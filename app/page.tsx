@@ -1,8 +1,8 @@
 // ─────────────────────────────────────────────────────────
 // これは「業務アプリの画面」です。宣伝ページ（LP）ではありません。
 //
-// /build を実行すると、docs/03_spec.md にそって
-// この構造を保ったまま、あなたの題材のツールに作り替えられます。
+// 題材: 業務と自主活動を1画面に並べ、見積もり時間と実績時間のズレを見る
+//       （docs/03_spec.md）
 //
 // 画面の骨格（この形は崩さない）:
 //   左メニュー（.side）＋ 上部バー（.topbar）＋ 本体（.content）
@@ -13,186 +13,147 @@
 import { useEffect, useMemo, useState } from "react";
 
 // ═══════════════════════════════════════════════════════════
-//  画面の型 ── ここだけ選び直せば、見た目と並び方が変わります
-//  /build が docs/03_spec.md の「0. 画面の型」を見てここを設定します。
-//  ⚠ 新しいCSSは書かない。下の選択肢から選ぶこと。
+//  画面の型 ── docs/03_spec.md の「0. 画面の型」で決めたもの
+//  ⚠ 新しいCSSは書かない。選択肢から選ぶだけ。
 // ═══════════════════════════════════════════════════════════
 
-/** 色み。業種の空気に合わせる
- *  "pine"   教育・サービス・その他（初期値）
- *  "indigo" 士業・不動産・BtoB
- *  "clay"   建設・工務店・現場仕事
- *  "sea"    医療・介護・公共
- *  "wine"   飲食・小売・美容
- */
-const TONE = "pine";
+/** 色み。BtoB企業のオフィスワークとして indigo（🔮 業種は未確認） */
+const TONE = "indigo";
 
-/** 密度。1日に見る件数で決める
- *  "compact" 1日20件以上（多くの行を1画面に）
- *  "normal"  ふつう（初期値）
- *  "roomy"   1日5件以下で、1件が重い（ゆったり）
- */
+/** 密度。1日数件〜10件程度と見て normal（🔮 件数は未確認） */
 const DENSITY = "normal";
 
-/** 画面の型。3行目「何が一覧で見られると助かるか」で決める
- *  "queue" 待たせているものを、古い順に片づける（問い合わせ・依頼・返信）
- *  "stage" いくつかの段階を順に進んでいく（査定→撮影→値付け→出品）
- *  "due"   期限がある（締切・訪問予定・提出物・更新期限）
- */
-const LAYOUT: "queue" | "stage" | "due" = "queue";
+/** 画面の型。業務と自主活動を並べて見たいので、区分ごとに束ねる stage */
+const LAYOUT: "queue" | "stage" | "due" = "stage";
 
-/** 数え方。件 / 名 / 棟 / 台 / 点 / 本 など、その仕事の言葉で */
-const UNIT = "件";
+/** 数え方。案件でも現場でもなく「自分のタスク」を数える */
+const UNIT = "タスク";
 
-/** 区分の選択肢。LAYOUT が "stage" のときは、これが「段階」になる（順番どおりに並ぶ） */
-const CATEGORIES = ["LINE", "電話", "メール", "紹介"];
+/** 区分。stage の束ねに使う。今回は段階ではなく「業務／自主活動」 */
+const CATEGORIES = ["業務", "自主活動"];
 
 // ═══════════════════════════════════════════════════════════
 
-/** 1件のデータ。/build でこの項目名を題材に合わせて変える */
-type Record = {
+/** 状態。未着手 → 進行中 → 完了 の順に進む */
+type Status = "未着手" | "進行中" | "完了";
+const STATUSES: Status[] = ["未着手", "進行中", "完了"];
+
+/** 1件のタスク。データ項目は5つ（id を除く） */
+type Task = {
   id: string;
-  name: string;      // 主たる名前（顧客名・品名など）
-  category: string;  // 区分／段階／種別
-  note: string;      // メモ
-  date: string;      // YYYY-MM-DD（queue=受けた日 / stage=受け入れた日 / due=期限）
-  done: boolean;     // 片づいたか
+  title: string;        // タイトル
+  category: string;     // 区分（業務 / 自主活動）
+  plan: number;         // 見積もり時間
+  actual: number | null; // 実績時間（未入力は null）
+  status: Status;       // 状態
 };
 
 type View = "list" | "new" | "settings";
 type Filter = "open" | "done" | "all";
 
-const KEY = "starter-records";
-const NAME_KEY = "starter-appname";
+const KEY = "task-hours-data";
+const NAME_KEY = "task-hours-appname";
+
+/** 入力できる時間。0.5刻み・8.0時間まで */
+const HOURS = Array.from({ length: 16 }, (_, i) => (i + 1) * 0.5);
 
 /** 画面の型ごとの言葉。ここを直せば画面じゅうの文言が揃って変わる */
 const TEXT = {
   queue: {
-    sub: "未対応のものが、待たせている順に並びます",
-    open: "未対応", done: "対応済",
-    toTo: "対応済みにする", toBack: "未対応に戻す",
-    dateLabel: "受けた日", catLabel: "区分",
-    stat2: "3日以上 放置",
-    headOpen: "未対応（待たせている順）",
+    sub: "待たせている順に並びます",
+    open: "未対応", done: "対応済", catLabel: "区分", headOpen: "未対応",
   },
   stage: {
-    sub: "どの段階で止まっているかが分かります",
-    open: "進行中", done: "完了",
-    toTo: "完了にする", toBack: "進行中に戻す",
-    dateLabel: "受け入れた日", catLabel: "いまの段階",
-    stat2: "7日以上 動きなし",
-    headOpen: "進行中",
+    sub: "見積もりと実績の差を見ます",
+    open: "未完了", done: "完了", catLabel: "区分", headOpen: "未完了",
   },
   due: {
     sub: "期限が近い順に並びます",
-    open: "未完了", done: "完了",
-    toTo: "完了にする", toBack: "未完了に戻す",
-    dateLabel: "期限", catLabel: "種別",
-    stat2: "期限切れ",
-    headOpen: "未完了（期限が近い順）",
+    open: "未完了", done: "完了", catLabel: "種別", headOpen: "未完了",
   },
 }[LAYOUT];
 
-/** n日前の日付。マイナスを渡すとn日後（"due" の見本データで使う） */
-const ago = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-const today = () => ago(0);
+const isDone = (t: Task) => t.status === "完了";
 
-/** 今日との差。0=今日、-3=3日過ぎている、+2=あと2日 */
-const diff = (d: string) =>
-  Math.round(
-    (new Date(d + "T00:00:00").getTime() - new Date(today() + "T00:00:00").getTime()) / 86400000
-  );
+/** 0.5刻みの足し算で端数が出ないように丸める */
+const r1 = (n: number) => Math.round(n * 10) / 10;
 
-/** 何日待たせているか（"queue" / "stage" 用） */
-const waiting = (d: string) => Math.max(0, -diff(d));
+/** 2.0 → "2.0h" */
+const h = (n: number) => r1(n).toFixed(1) + "h";
+
+/** 差。1.5 → "+1.5h" / -1.5 → "-1.5h" / 0 → "0.0h" */
+const sh = (n: number) => {
+  const v = r1(n);
+  return (v > 0 ? "+" : "") + (v === 0 ? 0 : v).toFixed(1) + "h";
+};
+
+/** 実績が入っているタスクだけの差（実績 − 見積もり） */
+const gapOf = (t: Task) => (t.actual === null ? null : r1(t.actual - t.plan));
 
 /**
- * 見本データ。/build でこの中身を題材に合わせて入れ替える。
- * ⚠ 実在の人名・会社名・連絡先は使わない。件数は12〜15件（少ないと画面が寂しく見える）
+ * 見本データ。⚠ 実在の人名・会社名・連絡先は使わない。
+ * 未完了9 / 完了5 の14タスク。業務は見積もりを超えがち、自主活動は届かない。
  */
-const SAMPLE: Record[] = [
-  { id: "s01", name: "佐藤さん（中2）", category: "LINE",   note: "数学と英語、週2希望。木曜以外",        date: ago(0),  done: false },
-  { id: "s02", name: "田村さん（小5）", category: "電話",   note: "折り返し希望 18時以降",               date: ago(1),  done: false },
-  { id: "s03", name: "鈴木さん（高1）", category: "紹介",   note: "在籍生のご家族から。物理を見てほしい",  date: ago(1),  done: false },
-  { id: "s04", name: "中村さん（中3）", category: "メール", note: "受験相談。志望校はまだ決めていない",   date: ago(2),  done: false },
-  { id: "s05", name: "渡辺さん（中2）", category: "紹介",   note: "平日夕方のみ。部活が19時まで",         date: ago(3),  done: false },
-  { id: "s06", name: "小林さん（中1）", category: "LINE",   note: "体験授業の日程を調整中",              date: ago(4),  done: false },
-  { id: "s07", name: "松本さん（小4）", category: "メール", note: "兄弟割引について聞かれている",         date: ago(5),  done: false },
-  { id: "s08", name: "山口さん（小6）", category: "電話",   note: "料金表を送ってほしいとのこと",         date: ago(6),  done: false },
-  { id: "s09", name: "吉田さん（高2）", category: "LINE",   note: "夏期講習の残席を確認したい",           date: ago(9),  done: false },
-  { id: "s10", name: "井上さん（中3）", category: "電話",   note: "面談日程を確定。来週火曜18時",         date: ago(12), done: true },
-  { id: "s11", name: "清水さん（高3）", category: "LINE",   note: "資料送付済み。返事待ち",              date: ago(14), done: true },
-  { id: "s12", name: "森さん（小3）",   category: "紹介",   note: "体験のあと入会。4月から週1",          date: ago(16), done: true },
-  { id: "s13", name: "大野さん（中1）", category: "メール", note: "他塾と比較検討中とのこと",            date: ago(18), done: true },
-  { id: "s14", name: "岡田さん（高1）", category: "LINE",   note: "今回は見送りとご連絡あり",            date: ago(21), done: true },
+const SAMPLE: Task[] = [
+  { id: "s01", title: "月次レポートの作成",        category: "業務",     plan: 2.0, actual: 3.5,  status: "完了"   },
+  { id: "s02", title: "後輩の設計レビュー",        category: "業務",     plan: 1.0, actual: null, status: "進行中" },
+  { id: "s03", title: "他部署との仕様すり合わせ",  category: "業務",     plan: 1.5, actual: 2.5,  status: "完了"   },
+  { id: "s04", title: "見積書の確認と差し戻し",    category: "業務",     plan: 0.5, actual: 0.5,  status: "完了"   },
+  { id: "s05", title: "定例会の資料づくり",        category: "業務",     plan: 1.5, actual: null, status: "進行中" },
+  { id: "s06", title: "障害の一次調査",            category: "業務",     plan: 1.0, actual: 2.0,  status: "完了"   },
+  { id: "s07", title: "来期の体制案をまとめる",    category: "業務",     plan: 3.0, actual: null, status: "未着手" },
+  { id: "s08", title: "新人向け手順書の更新",      category: "業務",     plan: 2.0, actual: null, status: "未着手" },
+  { id: "s09", title: "週次の進捗まとめ",          category: "業務",     plan: 0.5, actual: null, status: "進行中" },
+  { id: "s10", title: "資格講座 第3章",            category: "自主活動", plan: 2.0, actual: 0.5,  status: "進行中" },
+  { id: "s11", title: "資格講座 第4章",            category: "自主活動", plan: 2.0, actual: null, status: "未着手" },
+  { id: "s12", title: "過去問 2周目（第1回）",     category: "自主活動", plan: 1.5, actual: null, status: "未着手" },
+  { id: "s13", title: "技術書の読書メモをつける",  category: "自主活動", plan: 1.0, actual: null, status: "進行中" },
+  { id: "s14", title: "業界レポートの読み込み",    category: "自主活動", plan: 1.0, actual: 0.5,  status: "完了"   },
 ];
 
-/** 一覧をどう束ねるか。LAYOUT ごとに変わる */
-type Group = { key: string; label: string; mark?: "late" | "now"; items: Record[] };
+/** 一覧をどう束ねるか */
+type Group = { key: string; label: string; items: Task[] };
 
-function grouped(list: Record[], filter: Filter): Group[] {
-  const head = filter === "open" ? TEXT.headOpen : filter === "done" ? TEXT.done : "すべて";
-
-  if (LAYOUT === "stage" && filter === "open") {
-    // 段階ごとに束ねる。CATEGORIES の順に並べ、中身が無い段階は出さない
+function grouped(list: Task[], filter: Filter): Group[] {
+  if (LAYOUT === "stage") {
+    // 区分ごとに束ねる。CATEGORIES の順に並べ、中身が無い区分は出さない
     return CATEGORIES.map((c) => ({
       key: c,
       label: c,
-      mark: undefined,
       items: list.filter((i) => i.category === c),
     })).filter((g) => g.items.length > 0);
   }
-
-  if (LAYOUT === "due" && filter === "open") {
-    const buckets: Group[] = [
-      { key: "late",  label: "期限が過ぎている", mark: "late", items: [] },
-      { key: "now",   label: "今日・明日",       mark: "now",  items: [] },
-      { key: "week",  label: "今週のうち",                     items: [] },
-      { key: "later", label: "それ以降",                       items: [] },
-    ];
-    list.forEach((i) => {
-      const d = diff(i.date);
-      if (d < 0) buckets[0].items.push(i);
-      else if (d <= 1) buckets[1].items.push(i);
-      else if (d <= 7) buckets[2].items.push(i);
-      else buckets[3].items.push(i);
-    });
-    return buckets.filter((b) => b.items.length > 0);
-  }
-
+  const head = filter === "open" ? TEXT.headOpen : filter === "done" ? TEXT.done : "すべて";
   return [{ key: "all", label: head, items: list }];
 }
 
-/** 行の右に出す小さなバッジ。LAYOUT ごとに意味が変わる */
-function rowBadge(r: Record): { text: string; kind: "warn" | "danger" } | null {
-  if (r.done) return null;
-  if (LAYOUT === "due") {
-    const d = diff(r.date);
-    if (d < 0) return { text: `${-d}日 超過`, kind: "danger" };
-    if (d === 0) return { text: "今日", kind: "warn" };
-    return null;
-  }
-  const w = waiting(r.date);
-  const limit = LAYOUT === "stage" ? 7 : 3;
-  return w >= limit ? { text: `${w}日`, kind: "warn" } : null;
-}
+/** 次に押すと、どの状態になるか */
+const nextStatus = (s: Status): Status => STATUSES[(STATUSES.indexOf(s) + 1) % STATUSES.length];
 
 export default function Home() {
-  const [items, setItems] = useState<Record[]>([]);
-  const [appName, setAppName] = useState("お問い合わせ管理");
+  const [items, setItems] = useState<Task[]>([]);
+  const [appName, setAppName] = useState("見積もりと実績");
   const [loaded, setLoaded] = useState(false);
 
   const [view, setView] = useState<View>("list");
-  const [filter, setFilter] = useState<Filter>("open");
+  // 初期は「全部」。この画面の本体は、区分ごとの「置いた時間」と「できた時間」の対比なので、
+  // 未完了だけに絞ると実績が常に 0 近くになり、差が見えなくなる
+  const [filter, setFilter] = useState<Filter>("all");
   const [q, setQ] = useState("");
-  const [editing, setEditing] = useState<Record | null>(null);
+  const [editing, setEditing] = useState<Task | null>(null);
 
-  const [form, setForm] = useState({ name: "", category: CATEGORIES[0], note: "", date: today() });
+  const [form, setForm] = useState({
+    title: "",
+    category: CATEGORIES[0],
+    plan: 1,
+    actual: "",
+    status: "未着手" as Status,
+  });
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(KEY);
-      setItems(raw ? (JSON.parse(raw) as Record[]) : SAMPLE);
+      setItems(raw ? (JSON.parse(raw) as Task[]) : SAMPLE);
       const n = localStorage.getItem(NAME_KEY);
       if (n) setAppName(n);
     } catch {
@@ -212,55 +173,88 @@ export default function Home() {
 
   const counts = useMemo(
     () => ({
-      open: items.filter((i) => !i.done).length,
-      done: items.filter((i) => i.done).length,
+      open: items.filter((i) => !isDone(i)).length,
+      done: items.filter((i) => isDone(i)).length,
       all: items.length,
     }),
     [items]
   );
 
-  /** 2つ目の統計。LAYOUT で意味が変わる */
-  const attention = useMemo(() => {
-    const open = items.filter((i) => !i.done);
-    if (LAYOUT === "due") return open.filter((i) => diff(i.date) < 0).length;
-    const limit = LAYOUT === "stage" ? 7 : 3;
-    return open.filter((i) => waiting(i.date) >= limit).length;
+  /** 上部の数字3つ。見積もりは全タスク、実績と差は「実績を入れたタスク」だけ */
+  const totals = useMemo(() => {
+    const entered = items.filter((i) => i.actual !== null);
+    return {
+      plan: r1(items.reduce((s, i) => s + i.plan, 0)),
+      actual: r1(entered.reduce((s, i) => s + (i.actual ?? 0), 0)),
+      gap: r1(entered.reduce((s, i) => s + ((i.actual ?? 0) - i.plan), 0)),
+    };
   }, [items]);
 
   const shown = useMemo(() => {
     const k = q.trim().toLowerCase();
     return items
-      .filter((i) => (filter === "all" ? true : filter === "open" ? !i.done : i.done))
-      .filter((i) => !k || (i.name + i.note + i.category).toLowerCase().includes(k))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      .filter((i) => (filter === "all" ? true : filter === "open" ? !isDone(i) : isDone(i)))
+      .filter((i) => !k || (i.title + i.category + i.status).toLowerCase().includes(k))
+      .slice()
+      .sort((a, b) => Number(isDone(a)) - Number(isDone(b)));
   }, [items, filter, q]);
 
   const groups = useMemo(() => grouped(shown, filter), [shown, filter]);
 
   function resetForm() {
-    setForm({ name: "", category: CATEGORIES[0], note: "", date: today() });
+    setForm({ title: "", category: CATEGORIES[0], plan: 1, actual: "", status: "未着手" });
     setEditing(null);
   }
 
   function save() {
-    const name = form.name.trim();
-    if (!name) return;
+    const title = form.title.trim();
+    if (!title) return;
     if (editing) {
-      setItems(items.map((i) => (i.id === editing.id ? { ...i, ...form, name } : i)));
+      setItems(
+        items.map((i) =>
+          i.id === editing.id
+            ? {
+                ...i,
+                title,
+                category: form.category,
+                plan: form.plan,
+                actual: form.actual === "" ? null : Number(form.actual),
+                status: form.status,
+              }
+            : i
+        )
+      );
     } else {
-      setItems([...items, { id: String(Date.now()), ...form, name, done: false }]);
+      // 登録した時点では、実績はまだ分からない
+      setItems([
+        ...items,
+        { id: String(Date.now()), title, category: form.category, plan: form.plan, actual: null, status: "未着手" },
+      ]);
     }
     resetForm();
     setView("list");
   }
 
-  function startEdit(r: Record) {
-    setEditing(r);
-    setForm({ name: r.name, category: r.category, note: r.note, date: r.date });
+  function startEdit(t: Task) {
+    setEditing(t);
+    setForm({
+      title: t.title,
+      category: t.category,
+      plan: t.plan,
+      actual: t.actual === null ? "" : String(t.actual),
+      status: t.status,
+    });
     setView("new");
   }
 
-  const toggle = (id: string) => setItems(items.map((i) => (i.id === id ? { ...i, done: !i.done } : i)));
+  /** 操作2: 実績時間を、一覧の行から直接入れる */
+  const setActual = (id: string, v: string) =>
+    setItems(items.map((i) => (i.id === id ? { ...i, actual: v === "" ? null : Number(v) } : i)));
+
+  /** 操作3: 状態を進める（未着手 → 進行中 → 完了 → 未着手） */
+  const advance = (id: string) =>
+    setItems(items.map((i) => (i.id === id ? { ...i, status: nextStatus(i.status) } : i)));
+
   const remove = (id: string) => setItems(items.filter((i) => i.id !== id));
 
   const NAV: { k: View; label: string; count?: number }[] = [
@@ -297,7 +291,7 @@ export default function Home() {
             </button>
           ))}
         </div>
-        <div className="side-foot">/build で、あなたの題材に作り替わります</div>
+        <div className="side-foot">差は、実績を入れた{UNIT}だけで計算します</div>
       </nav>
 
       {/* ───────── 本体 ───────── */}
@@ -324,15 +318,15 @@ export default function Home() {
               )}
 
               <div className="stats">
-                <div className="stat"><div className="n accent">{counts.open}</div><div className="l">{TEXT.open}</div></div>
-                <div className="stat"><div className="n">{attention}</div><div className="l">{TEXT.stat2}</div></div>
-                <div className="stat"><div className="n">{counts.all}</div><div className="l">全{UNIT}</div></div>
+                <div className="stat"><div className="n accent">{h(totals.plan)}</div><div className="l">見積もり合計</div></div>
+                <div className="stat"><div className="n">{h(totals.actual)}</div><div className="l">実績合計</div></div>
+                <div className="stat"><div className="n">{sh(totals.gap)}</div><div className="l">差（実績を入れた分）</div></div>
               </div>
 
               <div className="filters">
                 <div className="search">
                   <input className="field" value={q} onChange={(e) => setQ(e.target.value)}
-                    placeholder="名前・メモで検索" />
+                    placeholder="タイトル・区分・状態で検索" />
                 </div>
                 <div className="seg">
                   {(["open", "done", "all"] as Filter[]).map((f) => (
@@ -353,45 +347,62 @@ export default function Home() {
                       <span className="count">0 {UNIT}</span>
                     </div>
                     <div className="empty">
-                      <div className="t">{q ? "見つかりませんでした" : "ここに表示するものがありません"}</div>
+                      <div className="t">{q ? "見つかりませんでした" : `ここに表示する${UNIT}がありません`}</div>
                       <div className="d">
-                        {q ? "検索の言葉を変えてみてください。" : "右上の「新規登録」から追加できます。"}
+                        {q
+                          ? "検索の言葉を変えてみてください。"
+                          : "右上の「新規登録」から、タイトルと見積もり時間を入れて追加できます。"}
                       </div>
                     </div>
                   </>
                 ) : (
-                  groups.map((g) => (
-                    <div key={g.key}>
-                      <div className={"group-head" + (g.mark ? ` is-${g.mark}` : "")}>
-                        {g.mark && <span className="dot" />}
-                        {g.label}
-                        <span className="count">{g.items.length} {UNIT}</span>
+                  groups.map((g) => {
+                    const gPlan = r1(g.items.reduce((s, i) => s + i.plan, 0));
+                    const gActual = r1(g.items.reduce((s, i) => s + (i.actual ?? 0), 0));
+                    return (
+                      <div key={g.key}>
+                        <div className="group-head">
+                          {g.label}
+                          <span className="count">
+                            見積 {h(gPlan)} / 実績 {h(gActual)}　{g.items.length} {UNIT}
+                          </span>
+                        </div>
+                        {g.items.map((t) => {
+                          const gap = gapOf(t);
+                          return (
+                            <div className="row" key={t.id}>
+                              <div className="row-main">
+                                <div className="row-title">{t.title}</div>
+                                <div className="row-sub">
+                                  見積 {h(t.plan)} → 実績 {t.actual === null ? "未入力" : h(t.actual)}
+                                </div>
+                              </div>
+                              <div className="row-meta">
+                                {gap !== null && gap !== 0 && <span className="badge">{sh(gap)}</span>}
+                                <span className={"badge" + (isDone(t) ? " badge-ok" : "")}>{t.status}</span>
+                                <select
+                                  className="select field"
+                                  aria-label={`${t.title} の実績時間`}
+                                  value={t.actual === null ? "" : String(t.actual)}
+                                  onChange={(e) => setActual(t.id, e.target.value)}
+                                >
+                                  <option value="">実績 未入力</option>
+                                  {HOURS.map((v) => (
+                                    <option key={v} value={v}>実績 {v.toFixed(1)}h</option>
+                                  ))}
+                                </select>
+                                <button className="btn-ghost" onClick={() => startEdit(t)}>編集</button>
+                                <button className="btn-ghost" onClick={() => advance(t.id)}>
+                                  {nextStatus(t.status)}にする
+                                </button>
+                                <button className="btn-ghost danger-btn" onClick={() => remove(t.id)}>削除</button>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                      {g.items.map((r) => {
-                        const b = rowBadge(r);
-                        return (
-                          <div className="row" key={r.id}>
-                            <div className="row-main">
-                              <div className="row-title">{r.name}</div>
-                              {r.note && <div className="row-sub">{r.note}</div>}
-                            </div>
-                            <div className="row-meta">
-                              {b && <span className={`badge badge-${b.kind}`}>{b.text}</span>}
-                              {!(LAYOUT === "stage" && filter === "open") && (
-                                <span className="badge">{r.category}</span>
-                              )}
-                              <span className="row-time">{r.date.slice(5).replace("-", "/")}</span>
-                              <button className="btn-ghost" onClick={() => startEdit(r)}>編集</button>
-                              <button className="btn-ghost" onClick={() => toggle(r.id)}>
-                                {r.done ? TEXT.toBack : TEXT.toTo}
-                              </button>
-                              <button className="btn-ghost danger-btn" onClick={() => remove(r.id)}>削除</button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
               <p className="note">データはこの端末のブラウザにだけ保存されます。外部には送信されません。</p>
@@ -402,12 +413,12 @@ export default function Home() {
           {view === "new" && (
             <div className="panel">
               <div className="form-row">
-                <label className="label" htmlFor="f-name">名前<span className="req">必須</span></label>
-                <input id="f-name" className="field" value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                <label className="label" htmlFor="f-title">タイトル<span className="req">必須</span></label>
+                <input id="f-title" className="field" value={form.title}
+                  onChange={(e) => setForm({ ...form, title: e.target.value })}
                   onKeyDown={(e) => { if (e.key === "Enter") save(); }}
-                  placeholder="例：Aさん（中2）" />
-                <span className="hint">あとで見て誰か分かる書き方にします</span>
+                  placeholder="例：資格講座 第3章" />
+                <span className="hint">あとで見て何のタスクか分かる書き方にします</span>
               </div>
 
               <div className="form-row">
@@ -420,22 +431,40 @@ export default function Home() {
                     </select>
                   </div>
                   <div>
-                    <label className="label" htmlFor="f-date">{TEXT.dateLabel}</label>
-                    <input id="f-date" className="field" type="date" value={form.date}
-                      onChange={(e) => setForm({ ...form, date: e.target.value })} />
+                    <label className="label" htmlFor="f-plan">見積もり時間</label>
+                    <select id="f-plan" className="select" value={String(form.plan)}
+                      onChange={(e) => setForm({ ...form, plan: Number(e.target.value) })}>
+                      {HOURS.map((v) => <option key={v} value={v}>{v.toFixed(1)}h</option>)}
+                    </select>
                   </div>
                 </div>
+                <span className="hint">実績時間は、終わったあとに一覧から入れます</span>
               </div>
 
-              <div className="form-row">
-                <label className="label" htmlFor="f-note">メモ</label>
-                <textarea id="f-note" className="field" value={form.note}
-                  onChange={(e) => setForm({ ...form, note: e.target.value })}
-                  placeholder="希望曜日・科目・折り返し時間など" />
-              </div>
+              {editing && (
+                <div className="form-row">
+                  <div className="inline">
+                    <div>
+                      <label className="label" htmlFor="f-actual">実績時間</label>
+                      <select id="f-actual" className="select" value={form.actual}
+                        onChange={(e) => setForm({ ...form, actual: e.target.value })}>
+                        <option value="">未入力</option>
+                        {HOURS.map((v) => <option key={v} value={v}>{v.toFixed(1)}h</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="f-status">状態</label>
+                      <select id="f-status" className="select" value={form.status}
+                        onChange={(e) => setForm({ ...form, status: e.target.value as Status })}>
+                        {STATUSES.map((s) => <option key={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="form-actions">
-                <button className="btn" onClick={save} disabled={!form.name.trim()}>
+                <button className="btn" onClick={save} disabled={!form.title.trim()}>
                   {editing ? "保存する" : "一覧に追加"}
                 </button>
                 <button className="btn-ghost" onClick={() => { resetForm(); setView("list"); }}>やめる</button>
@@ -471,6 +500,7 @@ export default function Home() {
                 </div>
                 <span className="hint">
                   現在 {counts.all} {UNIT}（{TEXT.open} {counts.open} / {TEXT.done} {counts.done}）
+                  ／ 見積もり合計 {h(totals.plan)}・実績合計 {h(totals.actual)}
                 </span>
               </div>
 
